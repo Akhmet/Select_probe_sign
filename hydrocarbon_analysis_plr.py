@@ -3,18 +3,22 @@
 """
 Анализ геохимических данных скважин с использованием pairwise log-ratios (PLR)
 Отбор проб и признаков для минимизации дисперсии внутри скважин
+Только для скважин (field исключены из анализа)
 """
 
 import pandas as pd
 import numpy as np
 from itertools import combinations
 from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE
 from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 import seaborn as sns
 import warnings
 warnings.filterwarnings('ignore')
+
+# Настройка стиля графиков
+plt.style.use('seaborn-v0_8-whitegrid')
+sns.set_palette("tab10")
 
 # Параметры
 MIN_PROBES_RATIO = 0.70  # Минимум 70% проб должно остаться
@@ -27,16 +31,17 @@ def load_data(filepath):
     print(f"Загружено {df.shape[0]} проб, {df.shape[1]} столбцов")
     return df
 
-def separate_wells_and_field(df):
+def separate_wells_and_field(df, well_col_idx=2):
     """Разделение на скважины и полевые точки"""
-    wells_df = df[~df.iloc[:, 2].str.contains('field', na=False)].copy()
-    field_df = df[df.iloc[:, 2].str.contains('field', na=False)].copy()
+    well_col = df.columns[well_col_idx]
+    wells_df = df[~df[well_col].astype(str).str.contains('field', na=False)].copy()
+    field_df = df[df[well_col].astype(str).str.contains('field', na=False)].copy()
     print(f"Скважины: {wells_df.shape[0]} проб, Полевые точки: {field_df.shape[0]} проб")
     return wells_df, field_df
 
-def get_hydrocarbon_columns(df):
+def get_hydrocarbon_columns(df, start_idx=3):
     """Получение имен столбцов с углеводородами (пропускаем первые 3)"""
-    return df.columns[3:]
+    return df.columns[start_idx:]
 
 def compute_pairwise_logratios(df, hc_columns):
     """Вычисление всех pairwise log-ratios"""
@@ -71,13 +76,12 @@ def compute_pairwise_logratios(df, hc_columns):
     print(f"Создано {len(pair_names)} PLR признаков")
     return plr_df, pair_names
 
-def select_probes_by_variance(plr_df, well_label_col, min_ratio=MIN_PROBES_RATIO, min_features=MIN_FEATURES):
+def select_probes_by_variance(plr_df, well_col, stage_col, min_ratio=MIN_PROBES_RATIO):
     """
     Отбор проб методом итеративного удаления наиболее удалённых проб
     Только для скважин (field исключаются из процесса)
     """
-    well_column = well_label_col
-    wells = plr_df[well_column].unique()
+    wells = plr_df[well_col].unique()
     
     # Исключаем field из процесса отбора
     wells = [w for w in wells if 'field' not in str(w).lower()]
@@ -90,7 +94,7 @@ def select_probes_by_variance(plr_df, well_label_col, min_ratio=MIN_PROBES_RATIO
     print(f"\nОтбор проб для {len(wells)} скважин...")
     
     for well in wells:
-        well_mask = plr_df[well_column] == well
+        well_mask = plr_df[well_col] == well
         well_indices = plr_df[well_mask].index.tolist()
         n_original = len(well_indices)
         n_min = int(n_original * min_ratio)
@@ -129,6 +133,7 @@ def select_probes_by_variance(plr_df, well_label_col, min_ratio=MIN_PROBES_RATIO
             removal_log.append({
                 'well': well,
                 'probe_id': plr_df.loc[probe_to_remove, plr_df.columns[0]],
+                'stage': plr_df.loc[probe_to_remove, stage_col],
                 'mean_distance': mean_distances[max_idx],
                 'remaining_probes': len(current_indices) - 1
             })
@@ -138,11 +143,6 @@ def select_probes_by_variance(plr_df, well_label_col, min_ratio=MIN_PROBES_RATIO
         
         selected_indices.extend(current_indices)
         print(f"    Осталось: {len(current_indices)} проб ({len(current_indices)/n_original*100:.1f}%)")
-    
-    # Добавляем все field пробы без изменений
-    field_mask = ~plr_df.index.isin(selected_indices)
-    field_indices = plr_df[field_mask].index.tolist()
-    selected_indices.extend(field_indices)
     
     plr_selected = plr_df.loc[selected_indices].copy()
     
@@ -167,21 +167,29 @@ def visualize_results(original_plr, selected_plr, selected_features, variances,
     
     plr_columns = original_plr.columns[3:]
     
-    # Настройка стиля
-    plt.style.use('seaborn-v0_8-whitegrid')
+    # Исключаем field из всех графиков
+    orig_wells_only = original_plr[~original_plr[well_col].astype(str).str.contains('field', na=False)].copy()
+    sel_wells_only = selected_plr[~selected_plr[well_col].astype(str).str.contains('field', na=False)].copy()
+    
+    # Получаем уникальные этапы для цветовой карты
+    stages = sorted(orig_wells_only[stage_col].unique())
+    n_stages = len(stages)
+    stage_colors = plt.cm.tab10(np.linspace(0, 1, min(n_stages, 10)))
+    stage_color_map = {stage: stage_colors[i % len(stage_colors)] for i, stage in enumerate(stages)}
+    
     fig_scale = 1.5
     
-    # 1. Тепловая карта попарных расстояний (до и после) для примера скважины
-    print("\nСоздание тепловых карт...")
+    # 1. Тепловая карта попарных расстояний (до и после) для КАЖДОЙ скважины
+    print("\nСоздание тепловых карт по скважинам...")
     
-    wells = original_plr[well_col].unique()
-    wells = [w for w in wells if 'field' not in str(w).lower()]
+    wells = sorted(orig_wells_only[well_col].unique())
     
-    if len(wells) > 0:
-        example_well = wells[0]
+    for well in wells:
+        orig_well = orig_wells_only[orig_wells_only[well_col] == well]
+        sel_well = sel_wells_only[sel_wells_only[well_col] == well]
         
-        orig_well = original_plr[original_plr[well_col] == example_well]
-        sel_well = selected_plr[selected_plr[well_col] == example_well]
+        if len(orig_well) < 2 or len(sel_well) < 2:
+            continue
         
         # Только выбранные признаки
         orig_data = orig_well[selected_features]
@@ -209,85 +217,156 @@ def visualize_results(original_plr, selected_plr, selected_features, variances,
         fig, axes = plt.subplots(1, 2, figsize=(12*fig_scale, 5*fig_scale))
         
         im0 = axes[0].imshow(orig_dist, cmap='viridis', aspect='auto')
-        axes[0].set_title(f'До отбора\n{example_well}: {orig_dist.shape[0]} проб', fontsize=12)
+        axes[0].set_title(f'До отбора\n{well}: {orig_dist.shape[0]} проб', fontsize=12)
         axes[0].set_xlabel('Пробы')
         axes[0].set_ylabel('Пробы')
         plt.colorbar(im0, ax=axes[0], label='Расстояние')
         
         im1 = axes[1].imshow(sel_dist, cmap='viridis', aspect='auto')
-        axes[1].set_title(f'После отбора\n{example_well}: {sel_dist.shape[0]} проб', fontsize=12)
+        axes[1].set_title(f'После отбора\n{well}: {sel_dist.shape[0]} проб', fontsize=12)
         axes[1].set_xlabel('Пробы')
         axes[1].set_ylabel('Пробы')
         plt.colorbar(im1, ax=axes[1], label='Расстояние')
         
         plt.tight_layout()
-        plt.savefig(f'{output_prefix}_distance_heatmaps.png', dpi=150)
+        plt.savefig(f'{output_prefix}_distance_{well}.png', dpi=150, bbox_inches='tight')
         plt.close()
-        print(f"  Сохранено: {output_prefix}_distance_heatmaps.png")
+        print(f"  Сохранено: {output_prefix}_distance_{well}.png")
     
-    # 2. PCA визуализация
-    print("\nСоздание PCA проекций...")
+    # 2. PCA визуализация для КАЖДОЙ скважины отдельно
+    print("\nСоздание PCA проекций по скважинам...")
     
-    pca = PCA(n_components=2)
+    for well in wells:
+        orig_well = orig_wells_only[orig_wells_only[well_col] == well].copy()
+        sel_well = sel_wells_only[sel_wells_only[well_col] == well].copy()
+        
+        if len(orig_well) < 2:
+            continue
+        
+        # PCA fit на исходных данных скважины
+        pca = PCA(n_components=2)
+        orig_pca = pca.fit_transform(orig_well[selected_features])
+        
+        if len(sel_well) >= 2:
+            sel_pca = pca.transform(sel_well[selected_features])
+        else:
+            sel_pca = None
+        
+        # Создаем фигуру с двумя подграфиками
+        fig, axes = plt.subplots(1, 2, figsize=(14*fig_scale, 6*fig_scale))
+        
+        # До отбора - раскрашиваем по этапам
+        for stage in orig_well[stage_col].unique():
+            mask = orig_well[stage_col] == stage
+            color = stage_color_map.get(stage, 'gray')
+            axes[0].scatter(orig_pca[mask, 0], orig_pca[mask, 1], 
+                           c=[color], label=f'Этап {stage}', 
+                           alpha=0.7, s=80, edgecolors='black', linewidth=0.5)
+        
+        axes[0].set_title(f'PCA: До отбора\n{well} ({len(orig_well)} проб)', fontsize=14)
+        axes[0].set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)')
+        axes[0].set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)')
+        axes[0].legend(loc='best', fontsize=10)
+        axes[0].grid(True, alpha=0.3)
+        
+        # После отбора
+        if sel_pca is not None and len(sel_well) >= 2:
+            for stage in sel_well[stage_col].unique():
+                mask = sel_well[stage_col] == stage
+                color = stage_color_map.get(stage, 'gray')
+                axes[1].scatter(sel_pca[mask, 0], sel_pca[mask, 1], 
+                               c=[color], label=f'Этап {stage}', 
+                               alpha=0.7, s=80, edgecolors='black', linewidth=0.5)
+            
+            axes[1].set_title(f'PCA: После отбора\n{well} ({len(sel_well)} проб)', fontsize=14)
+            axes[1].set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)')
+            axes[1].set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)')
+            axes[1].legend(loc='best', fontsize=10)
+            axes[1].grid(True, alpha=0.3)
+        else:
+            axes[1].text(0.5, 0.5, 'Нет данных\nдля отображения', 
+                        transform=axes[1].transAxes, ha='center', va='center', fontsize=14)
+            axes[1].set_title(f'PCA: После отбора\n{well}', fontsize=14)
+        
+        plt.tight_layout()
+        plt.savefig(f'{output_prefix}_pca_{well}.png', dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"  Сохранено: {output_prefix}_pca_{well}.png")
     
-    orig_pca = pca.fit_transform(original_plr[selected_features])
-    sel_pca = pca.transform(selected_plr[selected_features])
+    # 3. Общая PCA для всех скважин (для сравнения)
+    print("\nСоздание общей PCA проекции...")
     
-    fig, axes = plt.subplots(1, 2, figsize=(14*fig_scale, 5*fig_scale))
+    pca_all = PCA(n_components=2)
+    orig_pca_all = pca_all.fit_transform(orig_wells_only[selected_features])
+    sel_pca_all = pca_all.transform(sel_wells_only[selected_features])
     
-    # До отбора
-    scatter0 = axes[0].scatter(orig_pca[:, 0], orig_pca[:, 1], 
-                               c=pd.factorize(original_plr[well_col])[0], 
-                               cmap='tab10', alpha=0.6, s=50)
-    axes[0].set_title(f'PCA: До отбора ({original_plr.shape[0]} проб)', fontsize=12)
-    axes[0].set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)')
-    axes[0].set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)')
-    plt.colorbar(scatter0, ax=axes[0], label='Скважина')
+    fig, axes = plt.subplots(1, 2, figsize=(16*fig_scale, 6*fig_scale))
     
-    # После отбора
-    scatter1 = axes[1].scatter(sel_pca[:, 0], sel_pca[:, 1], 
-                               c=pd.factorize(selected_plr[well_col])[0], 
-                               cmap='tab10', alpha=0.6, s=50)
-    axes[1].set_title(f'PCA: После отбора ({selected_plr.shape[0]} проб)', fontsize=12)
-    axes[1].set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)')
-    axes[1].set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)')
-    plt.colorbar(scatter1, ax=axes[1], label='Скважина')
+    # До отбора - по скважинам
+    unique_wells = orig_wells_only[well_col].unique()
+    for i, well in enumerate(unique_wells):
+        mask = orig_wells_only[well_col] == well
+        axes[0].scatter(orig_pca_all[mask, 0], orig_pca_all[mask, 1], 
+                       label=well, alpha=0.6, s=60, edgecolors='black', linewidth=0.3)
+    
+    axes[0].set_title(f'PCA: До отбора (все скважины, {len(orig_wells_only)} проб)', fontsize=14)
+    axes[0].set_xlabel(f'PC1 ({pca_all.explained_variance_ratio_[0]*100:.1f}%)')
+    axes[0].set_ylabel(f'PC2 ({pca_all.explained_variance_ratio_[1]*100:.1f}%)')
+    axes[0].legend(loc='best', fontsize=9)
+    axes[0].grid(True, alpha=0.3)
+    
+    # После отбора - по скважинам
+    for i, well in enumerate(sel_wells_only[well_col].unique()):
+        mask = sel_wells_only[well_col] == well
+        axes[1].scatter(sel_pca_all[mask, 0], sel_pca_all[mask, 1], 
+                       label=well, alpha=0.6, s=60, edgecolors='black', linewidth=0.3)
+    
+    axes[1].set_title(f'PCA: После отбора (все скважины, {len(sel_wells_only)} проб)', fontsize=14)
+    axes[1].set_xlabel(f'PC1 ({pca_all.explained_variance_ratio_[0]*100:.1f}%)')
+    axes[1].set_ylabel(f'PC2 ({pca_all.explained_variance_ratio_[1]*100:.1f}%)')
+    axes[1].legend(loc='best', fontsize=9)
+    axes[1].grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig(f'{output_prefix}_pca_comparison.png', dpi=150)
+    plt.savefig(f'{output_prefix}_pca_all_comparison.png', dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"  Сохранено: {output_prefix}_pca_comparison.png")
+    print(f"  Сохранено: {output_prefix}_pca_all_comparison.png")
     
-    # 3. t-SNE визуализация
-    print("\nСоздание t-SNE проекций...")
+    # 4. PCA по этапам внутри каждой скважины
+    print("\nСоздание PCA проекций по этапам для каждой скважины...")
     
-    tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, selected_plr.shape[0]-1))
+    for well in wells:
+        orig_well = orig_wells_only[orig_wells_only[well_col] == well].copy()
+        sel_well = sel_wells_only[sel_wells_only[well_col] == well].copy()
+        
+        if len(orig_well) < 2:
+            continue
+        
+        pca = PCA(n_components=2)
+        orig_pca = pca.fit_transform(orig_well[selected_features])
+        
+        fig, ax = plt.subplots(figsize=(10*fig_scale, 8*fig_scale))
+        
+        # Раскрашиваем по этапам
+        for stage in sorted(orig_well[stage_col].unique()):
+            mask = orig_well[stage_col] == stage
+            color = stage_color_map.get(stage, 'gray')
+            ax.scatter(orig_pca[mask, 0], orig_pca[mask, 1], 
+                      c=[color], label=f'Этап {stage}', 
+                      alpha=0.7, s=100, edgecolors='black', linewidth=0.5)
+        
+        ax.set_title(f'PCA: {well}\nРаскраска по этапам ({len(orig_well)} проб)', fontsize=14)
+        ax.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)')
+        ax.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)')
+        ax.legend(loc='best', fontsize=11)
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(f'{output_prefix}_pca_stages_{well}.png', dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"  Сохранено: {output_prefix}_pca_stages_{well}.png")
     
-    orig_tsne = tsne.fit_transform(original_plr[selected_features])
-    sel_tsne = tsne.fit_transform(selected_plr[selected_features])
-    
-    fig, axes = plt.subplots(1, 2, figsize=(14*fig_scale, 5*fig_scale))
-    
-    scatter0 = axes[0].scatter(orig_tsne[:, 0], orig_tsne[:, 1], 
-                               c=pd.factorize(original_plr[well_col])[0], 
-                               cmap='tab10', alpha=0.6, s=50)
-    axes[0].set_title(f't-SNE: До отбора', fontsize=12)
-    axes[0].set_xlabel('t-SNE 1')
-    axes[0].set_ylabel('t-SNE 2')
-    
-    scatter1 = axes[1].scatter(sel_tsne[:, 0], sel_tsne[:, 1], 
-                               c=pd.factorize(selected_plr[well_col])[0], 
-                               cmap='tab10', alpha=0.6, s=50)
-    axes[1].set_title(f't-SNE: После отбора', fontsize=12)
-    axes[1].set_xlabel('t-SNE 1')
-    axes[1].set_ylabel('t-SNE 2')
-    
-    plt.tight_layout()
-    plt.savefig(f'{output_prefix}_tsne_comparison.png', dpi=150)
-    plt.close()
-    print(f"  Сохранено: {output_prefix}_tsne_comparison.png")
-    
-    # 4. Распределение дисперсий признаков
+    # 5. Распределение дисперсий признаков
     print("\nСоздание графиков дисперсий...")
     
     fig, axes = plt.subplots(1, 2, figsize=(14*fig_scale, 5*fig_scale))
@@ -314,11 +393,11 @@ def visualize_results(original_plr, selected_plr, selected_features, variances,
     plt.close()
     print(f"  Сохранено: {output_prefix}_variance_distribution.png")
     
-    # 5. Дисперсия по скважинам и этапам
+    # 6. Дисперсия по скважинам и этапам
     print("\nАнализ дисперсии по скважинам и этапам...")
     
-    well_variances = selected_plr.groupby(well_col)[selected_features].var().mean(axis=1)
-    stage_variances = selected_plr.groupby(stage_col)[selected_features].var().mean(axis=1)
+    well_variances = sel_wells_only.groupby(well_col)[selected_features].var().mean(axis=1)
+    stage_variances = sel_wells_only.groupby(stage_col)[selected_features].var().mean(axis=1)
     
     fig, axes = plt.subplots(1, 2, figsize=(12*fig_scale, 5*fig_scale))
     
@@ -337,7 +416,7 @@ def visualize_results(original_plr, selected_plr, selected_features, variances,
     plt.close()
     print(f"  Сохранено: {output_prefix}_variance_by_groups.png")
     
-    # 6. График удаления проб
+    # 7. График удаления проб
     if removal_log:
         removal_df = pd.DataFrame(removal_log)
         
@@ -383,9 +462,8 @@ def main():
     stage_col = df.columns[1]  # Столбец с этапами
     
     plr_selected, removal_log = select_probes_by_variance(
-        plr_df, well_col, 
-        min_ratio=MIN_PROBES_RATIO, 
-        min_features=MIN_FEATURES
+        plr_df, well_col, stage_col,
+        min_ratio=MIN_PROBES_RATIO
     )
     
     # 6. Отбор признаков по дисперсии
