@@ -1,1 +1,6 @@
-hydrocarbon_analysis.py
+```
+# Results and output files
+results_*.png
+results_*.txt
+results_*.csv
+```

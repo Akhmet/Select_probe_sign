@@ -438,6 +438,241 @@ def visualize_results(original_plr, selected_plr, selected_features, variances,
         plt.close()
         print(f"  Сохранено: {output_prefix}_probe_removal.png")
 
+def visualize_pca_comparison_groups(original_plr, selected_plr, selected_features, 
+                                     well_col, stage_col, output_prefix='results'):
+    """
+    Создание двух графиков PCA сравнения "до" и "после" для指定нных групп скважин:
+    1. Группа 1: 3_IRG, 1_IRG, field
+    2. Группа 2: 3_IRG, 30_BUG, field
+    
+    Для каждой группы вычисляется расстояние между центроидами этапов 1 и 2.
+    """
+    
+    plr_columns = original_plr.columns[3:]
+    
+    # Получаем уникальные этапы для цветовой карты
+    stages = sorted(original_plr[stage_col].unique())
+    n_stages = len(stages)
+    stage_colors = plt.cm.tab10(np.linspace(0, 1, min(n_stages, 10)))
+    stage_color_map = {stage: stage_colors[i % len(stage_colors)] for i, stage in enumerate(stages)}
+    
+    fig_scale = 1.5
+    
+    # --- ГРУППА 1: 3_IRG, 1_IRG, field ---
+    group1_wells = ['3_IRG', '1_IRG']
+    group1_mask = original_plr[well_col].isin(group1_wells) | original_plr[well_col].astype(str).str.contains('field', na=False)
+    
+    orig_group1 = original_plr[group1_mask].copy()
+    sel_group1 = selected_plr[selected_plr[well_col].isin(group1_wells) | selected_plr[well_col].astype(str).str.contains('field', na=False)].copy()
+    
+    if len(orig_group1) >= 2:
+        print("\nСоздание PCA сравнения для Группы 1 (3_IRG, 1_IRG, field)...")
+        
+        # PCA fit на исходных данных группы 1
+        pca_group1 = PCA(n_components=2)
+        orig_pca_group1 = pca_group1.fit_transform(orig_group1[selected_features])
+        
+        if len(sel_group1) >= 2:
+            sel_pca_group1 = pca_group1.transform(sel_group1[selected_features])
+        else:
+            sel_pca_group1 = None
+        
+        fig, axes = plt.subplots(1, 2, figsize=(16*fig_scale, 7*fig_scale))
+        
+        # До отбора
+        for well in orig_group1[well_col].unique():
+            mask = orig_group1[well_col] == well
+            # Раскрашиваем по этапам внутри каждой скважины
+            for stage in orig_group1.loc[mask, stage_col].unique():
+                stage_mask = mask & (orig_group1[stage_col] == stage)
+                color = stage_color_map.get(stage, 'gray')
+                axes[0].scatter(orig_pca_group1[stage_mask, 0], orig_pca_group1[stage_mask, 1], 
+                               c=[color], label=f'{well} Этап {stage}', 
+                               alpha=0.7, s=80, edgecolors='black', linewidth=0.5)
+        
+        # Вычисляем центроиды для этапов 1 и 2 (если они есть)
+        centroid_distances_group1 = {}
+        for well in group1_wells:
+            well_data = orig_group1[orig_group1[well_col] == well]
+            if len(well_data) >= 2 and stage_col in well_data.columns:
+                stage_1_data = well_data[well_data[stage_col] == 1]
+                stage_2_data = well_data[well_data[stage_col] == 2]
+                
+                if len(stage_1_data) >= 1 and len(stage_2_data) >= 1:
+                    centroid_1 = orig_pca_group1[orig_group1[orig_group1[well_col] == well].index.get_indexer(stage_1_data.index)].mean(axis=0)
+                    centroid_2 = orig_pca_group1[orig_group1[orig_group1[well_col] == well].index.get_indexer(stage_2_data.index)].mean(axis=0)
+                    
+                    distance = np.sqrt(np.sum((centroid_1 - centroid_2)**2))
+                    centroid_distances_group1[well] = distance
+                    
+                    # Визуализация центроидов
+                    axes[0].plot(centroid_1[0], centroid_1[1], 's', color='red', markersize=15, 
+                                markeredgecolor='darkred', markeredgewidth=2, label=f'{well} Этап 1 центр')
+                    axes[0].plot(centroid_2[0], centroid_2[1], 'o', color='red', markersize=15, 
+                                markeredgecolor='darkred', markeredgewidth=2, label=f'{well} Этап 2 центр')
+        
+        axes[0].set_title(f'PCA: До отбора\nГруппа 1: 3_IRG, 1_IRG, field\n({len(orig_group1)} проб)', fontsize=14)
+        axes[0].set_xlabel(f'PC1 ({pca_group1.explained_variance_ratio_[0]*100:.1f}%)')
+        axes[0].set_ylabel(f'PC2 ({pca_group1.explained_variance_ratio_[1]*100:.1f}%)')
+        axes[0].legend(loc='best', fontsize=8, ncol=2)
+        axes[0].grid(True, alpha=0.3)
+        
+        # После отбора
+        if sel_pca_group1 is not None and len(sel_group1) >= 2:
+            for well in sel_group1[well_col].unique():
+                mask = sel_group1[well_col] == well
+                for stage in sel_group1.loc[mask, stage_col].unique():
+                    stage_mask = mask & (sel_group1[stage_col] == stage)
+                    color = stage_color_map.get(stage, 'gray')
+                    axes[1].scatter(sel_pca_group1[stage_mask, 0], sel_pca_group1[stage_mask, 1], 
+                                   c=[color], label=f'{well} Этап {stage}', 
+                                   alpha=0.7, s=80, edgecolors='black', linewidth=0.5)
+            
+            # Центроиды после отбора
+            for well in group1_wells:
+                well_data = sel_group1[sel_group1[well_col] == well]
+                if len(well_data) >= 2:
+                    stage_1_data = well_data[well_data[stage_col] == 1]
+                    stage_2_data = well_data[well_data[stage_col] == 2]
+                    
+                    if len(stage_1_data) >= 1 and len(stage_2_data) >= 1:
+                        centroid_1 = sel_pca_group1[sel_group1[sel_group1[well_col] == well].index.get_indexer(stage_1_data.index)].mean(axis=0)
+                        centroid_2 = sel_pca_group1[sel_group1[sel_group1[well_col] == well].index.get_indexer(stage_2_data.index)].mean(axis=0)
+                        
+                        distance = np.sqrt(np.sum((centroid_1 - centroid_2)**2))
+                        
+                        axes[1].plot(centroid_1[0], centroid_1[1], 's', color='red', markersize=15, 
+                                    markeredgecolor='darkred', markeredgewidth=2)
+                        axes[1].plot(centroid_2[0], centroid_2[1], 'o', color='red', markersize=15, 
+                                    markeredgecolor='darkred', markeredgewidth=2)
+            
+            axes[1].set_title(f'PCA: После отбора\nГруппа 1: 3_IRG, 1_IRG, field\n({len(sel_group1)} проб)', fontsize=14)
+            axes[1].set_xlabel(f'PC1 ({pca_group1.explained_variance_ratio_[0]*100:.1f}%)')
+            axes[1].set_ylabel(f'PC2 ({pca_group1.explained_variance_ratio_[1]*100:.1f}%)')
+            axes[1].legend(loc='best', fontsize=8, ncol=2)
+            axes[1].grid(True, alpha=0.3)
+        else:
+            axes[1].text(0.5, 0.5, 'Нет данных\nдля отображения', 
+                        transform=axes[1].transAxes, ha='center', va='center', fontsize=14)
+        
+        plt.tight_layout()
+        plt.savefig(f'{output_prefix}_pca_comparison_group1.png', dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"  Сохранено: {output_prefix}_pca_comparison_group1.png")
+        
+        # Вывод расстояний между центроидами
+        if centroid_distances_group1:
+            print("  Расстояния между центроидами этапов 1 и 2 (Группа 1):")
+            for well, dist in centroid_distances_group1.items():
+                print(f"    {well}: {dist:.3f}")
+    
+    # --- ГРУППА 2: 3_IRG, 30_BUG, field ---
+    group2_wells = ['3_IRG', '30_BUG']
+    group2_mask = original_plr[well_col].isin(group2_wells) | original_plr[well_col].astype(str).str.contains('field', na=False)
+    
+    orig_group2 = original_plr[group2_mask].copy()
+    sel_group2 = selected_plr[selected_plr[well_col].isin(group2_wells) | selected_plr[well_col].astype(str).str.contains('field', na=False)].copy()
+    
+    if len(orig_group2) >= 2:
+        print("\nСоздание PCA сравнения для Группы 2 (3_IRG, 30_BUG, field)...")
+        
+        # PCA fit на исходных данных группы 2
+        pca_group2 = PCA(n_components=2)
+        orig_pca_group2 = pca_group2.fit_transform(orig_group2[selected_features])
+        
+        if len(sel_group2) >= 2:
+            sel_pca_group2 = pca_group2.transform(sel_group2[selected_features])
+        else:
+            sel_pca_group2 = None
+        
+        fig, axes = plt.subplots(1, 2, figsize=(16*fig_scale, 7*fig_scale))
+        
+        # До отбора
+        for well in orig_group2[well_col].unique():
+            mask = orig_group2[well_col] == well
+            for stage in orig_group2.loc[mask, stage_col].unique():
+                stage_mask = mask & (orig_group2[stage_col] == stage)
+                color = stage_color_map.get(stage, 'gray')
+                axes[0].scatter(orig_pca_group2[stage_mask, 0], orig_pca_group2[stage_mask, 1], 
+                               c=[color], label=f'{well} Этап {stage}', 
+                               alpha=0.7, s=80, edgecolors='black', linewidth=0.5)
+        
+        # Вычисляем центроиды для этапов 1 и 2
+        centroid_distances_group2 = {}
+        for well in group2_wells:
+            well_data = orig_group2[orig_group2[well_col] == well]
+            if len(well_data) >= 2:
+                stage_1_data = well_data[well_data[stage_col] == 1]
+                stage_2_data = well_data[well_data[stage_col] == 2]
+                
+                if len(stage_1_data) >= 1 and len(stage_2_data) >= 1:
+                    centroid_1 = orig_pca_group2[orig_group2[orig_group2[well_col] == well].index.get_indexer(stage_1_data.index)].mean(axis=0)
+                    centroid_2 = orig_pca_group2[orig_group2[orig_group2[well_col] == well].index.get_indexer(stage_2_data.index)].mean(axis=0)
+                    
+                    distance = np.sqrt(np.sum((centroid_1 - centroid_2)**2))
+                    centroid_distances_group2[well] = distance
+                    
+                    axes[0].plot(centroid_1[0], centroid_1[1], 's', color='red', markersize=15, 
+                                markeredgecolor='darkred', markeredgewidth=2, label=f'{well} Этап 1 центр')
+                    axes[0].plot(centroid_2[0], centroid_2[1], 'o', color='red', markersize=15, 
+                                markeredgecolor='darkred', markeredgewidth=2, label=f'{well} Этап 2 центр')
+        
+        axes[0].set_title(f'PCA: До отбора\nГруппа 2: 3_IRG, 30_BUG, field\n({len(orig_group2)} проб)', fontsize=14)
+        axes[0].set_xlabel(f'PC1 ({pca_group2.explained_variance_ratio_[0]*100:.1f}%)')
+        axes[0].set_ylabel(f'PC2 ({pca_group2.explained_variance_ratio_[1]*100:.1f}%)')
+        axes[0].legend(loc='best', fontsize=8, ncol=2)
+        axes[0].grid(True, alpha=0.3)
+        
+        # После отбора
+        if sel_pca_group2 is not None and len(sel_group2) >= 2:
+            for well in sel_group2[well_col].unique():
+                mask = sel_group2[well_col] == well
+                for stage in sel_group2.loc[mask, stage_col].unique():
+                    stage_mask = mask & (sel_group2[stage_col] == stage)
+                    color = stage_color_map.get(stage, 'gray')
+                    axes[1].scatter(sel_pca_group2[stage_mask, 0], sel_pca_group2[stage_mask, 1], 
+                                   c=[color], label=f'{well} Этап {stage}', 
+                                   alpha=0.7, s=80, edgecolors='black', linewidth=0.5)
+            
+            # Центроиды после отбора
+            for well in group2_wells:
+                well_data = sel_group2[sel_group2[well_col] == well]
+                if len(well_data) >= 2:
+                    stage_1_data = well_data[well_data[stage_col] == 1]
+                    stage_2_data = well_data[well_data[stage_col] == 2]
+                    
+                    if len(stage_1_data) >= 1 and len(stage_2_data) >= 1:
+                        centroid_1 = sel_pca_group2[sel_group2[sel_group2[well_col] == well].index.get_indexer(stage_1_data.index)].mean(axis=0)
+                        centroid_2 = sel_pca_group2[sel_group2[sel_group2[well_col] == well].index.get_indexer(stage_2_data.index)].mean(axis=0)
+                        
+                        distance = np.sqrt(np.sum((centroid_1 - centroid_2)**2))
+                        
+                        axes[1].plot(centroid_1[0], centroid_1[1], 's', color='red', markersize=15, 
+                                    markeredgecolor='darkred', markeredgewidth=2)
+                        axes[1].plot(centroid_2[0], centroid_2[1], 'o', color='red', markersize=15, 
+                                    markeredgecolor='darkred', markeredgewidth=2)
+            
+            axes[1].set_title(f'PCA: После отбора\nГруппа 2: 3_IRG, 30_BUG, field\n({len(sel_group2)} проб)', fontsize=14)
+            axes[1].set_xlabel(f'PC1 ({pca_group2.explained_variance_ratio_[0]*100:.1f}%)')
+            axes[1].set_ylabel(f'PC2 ({pca_group2.explained_variance_ratio_[1]*100:.1f}%)')
+            axes[1].legend(loc='best', fontsize=8, ncol=2)
+            axes[1].grid(True, alpha=0.3)
+        else:
+            axes[1].text(0.5, 0.5, 'Нет данных\nдля отображения', 
+                        transform=axes[1].transAxes, ha='center', va='center', fontsize=14)
+        
+        plt.tight_layout()
+        plt.savefig(f'{output_prefix}_pca_comparison_group2.png', dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"  Сохранено: {output_prefix}_pca_comparison_group2.png")
+        
+        # Вывод расстояний между центроидами
+        if centroid_distances_group2:
+            print("  Расстояния между центроидами этапов 1 и 2 (Группа 2):")
+            for well, dist in centroid_distances_group2.items():
+                print(f"    {well}: {dist:.3f}")
+
+
 def main():
     """Основная функция"""
     print("="*60)
@@ -490,6 +725,13 @@ def main():
         plr_df, plr_selected, selected_features, variances,
         well_col, stage_col, removal_log,
         output_prefix='results_plr'
+    )
+    
+    # 7a. PCA сравнение для групп скважин (с расчетом расстояния центроидов)
+    visualize_pca_comparison_groups(
+        plr_df, plr_selected, selected_features,
+        well_col, stage_col,
+        output_prefix='results'
     )
     
     # 8. Сохранение результатов
