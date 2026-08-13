@@ -426,6 +426,189 @@ class HydrocarbonSampleSelector:
         
         return self
     
+    def visualize_pca_comparison(self, well_groups=None, save_path_prefix='results'):
+        """
+        Визуализация PCA сравнения 'до' и 'после' отбора для указанных групп скважин.
+        Также вычисляется расстояние между центроидами этапов 1 и 2.
+        
+        Параметры:
+        -----------
+        well_groups : list of list of str
+            Группы скважин для отображения на отдельных графиках.
+            Если None, используются группы по умолчанию:
+            - [['3_IRG', '1_IRG', 'field'], ['3_IRG', '30_BUG', 'field']]
+        """
+        print("\nСоздание PCA графиков сравнения 'до' и 'после'...")
+        
+        if well_groups is None:
+            well_groups = [
+                ['3_IRG', '1_IRG', 'field'],
+                ['3_IRG', '30_BUG', 'field']
+            ]
+        
+        for group_idx, wells_in_group in enumerate(well_groups):
+            print(f"  Обработка группы {group_idx + 1}: {wells_in_group}")
+            
+            # Маска для выбранных скважин (до отбора - все данные)
+            mask_before = np.isin(self.well_labels, wells_in_group)
+            # Маска для выбранных скважин (после отбора)
+            mask_after = np.isin(self.selected_well_labels, wells_in_group)
+            
+            if np.sum(mask_before) == 0 or np.sum(mask_after) == 0:
+                print(f"    Пропущено: нет данных для скважин {wells_in_group}")
+                continue
+            
+            # Данные до и после отбора
+            data_before = self.data_clr[mask_before]
+            stages_before = self.stage_labels[mask_before]
+            wells_before = self.well_labels[mask_before]
+            ids_before = self.sample_ids[mask_before]
+            
+            data_after = self.selected_data[mask_after]
+            stages_after = self.selected_stage_labels[mask_after]
+            wells_after = self.selected_well_labels[mask_after]
+            ids_after = self.selected_sample_ids[mask_after]
+            
+            # Определение количества компонент PCA
+            n_components_before = min(2, data_before.shape[0]-1, data_before.shape[1])
+            n_components_after = min(2, data_after.shape[0]-1, data_after.shape[1])
+            n_components = max(n_components_before, n_components_after)
+            
+            if n_components < 2:
+                print(f"    Пропущено: недостаточно данных для PCA")
+                continue
+            
+            # Fit PCA на объединенных данных для консистентности
+            combined_data = np.vstack([data_before, data_after])
+            pca = PCA(n_components=min(2, combined_data.shape[0]-1, combined_data.shape[1]))
+            pca.fit(combined_data)
+            
+            # Трансформация данных
+            pca_before = pca.transform(data_before)
+            pca_after = pca.transform(data_after)
+            
+            # Вычисление центроидов для этапов 1 и 2
+            def compute_centroid_distances(pca_data, stages, wells, prefix):
+                """Вычисляет расстояния между центроидами этапов 1 и 2 для каждой скважины"""
+                centroid_distances = {}
+                unique_wells_stages = np.unique(wells)
+                
+                for well in unique_wells_stages:
+                    well_mask = wells == well
+                    well_pca = pca_data[well_mask]
+                    well_stages = stages[well_mask]
+                    
+                    stage_1_mask = well_stages == '1'
+                    stage_2_mask = well_stages == '2'
+                    
+                    if np.sum(stage_1_mask) > 0 and np.sum(stage_2_mask) > 0:
+                        centroid_1 = np.mean(well_pca[stage_1_mask], axis=0)
+                        centroid_2 = np.mean(well_pca[stage_2_mask], axis=0)
+                        distance = np.sqrt(np.sum((centroid_1 - centroid_2)**2))
+                        centroid_distances[well] = distance
+                    elif np.sum(stage_1_mask) > 0:
+                        centroid_distances[well] = 0.0  # Только этап 1
+                    elif np.sum(stage_2_mask) > 0:
+                        centroid_distances[well] = 0.0  # Только этап 2
+                
+                return centroid_distances
+            
+            centroid_dist_before = compute_centroid_distances(pca_before, stages_before, wells_before, 'до')
+            centroid_dist_after = compute_centroid_distances(pca_after, stages_after, wells_after, 'после')
+            
+            # Создание графика
+            fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+            
+            # График ДО отбора
+            ax1 = axes[0]
+            scatter1 = ax1.scatter(pca_before[:, 0], pca_before[:, 1], 
+                                   c=pd.factorize(stages_before)[0], 
+                                   cmap='viridis', alpha=0.6, s=80, edgecolors='black', linewidth=0.5)
+            
+            # Добавление меток скважин
+            for i, well in enumerate(wells_before):
+                ax1.annotate(well, (pca_before[i, 0], pca_before[i, 1]), 
+                            fontsize=8, alpha=0.7, xytext=(3, 3), textcoords='offset points')
+            
+            # Отображение центроидов
+            for well in np.unique(wells_before):
+                well_mask = wells_before == well
+                well_pca = pca_before[well_mask]
+                well_stages = stages_before[well_mask]
+                
+                for stage in ['1', '2']:
+                    stage_mask = well_stages == stage
+                    if np.sum(stage_mask) > 0:
+                        centroid = np.mean(well_pca[stage_mask], axis=0)
+                        marker = 's' if stage == '1' else 'o'
+                        ax1.scatter(centroid[0], centroid[1], 
+                                   marker=marker, s=200, c='red', 
+                                   edgecolors='darkred', linewidth=2,
+                                   label=f'{well} Stage {stage}' if well == wells_in_group[0] else "")
+            
+            ax1.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.2%})')
+            ax1.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.2%})')
+            ax1.set_title(f'PCA: До отбора\nСкважины: {", ".join(wells_in_group)}', fontsize=12)
+            ax1.grid(True, alpha=0.3)
+            
+            # Легенда с расстояниями центроидов
+            legend_text = []
+            for well, dist in centroid_dist_before.items():
+                legend_text.append(f'{well}: d={dist:.3f}')
+            if legend_text:
+                ax1.text(0.02, 0.98, '\n'.join(legend_text), transform=ax1.transAxes, 
+                        fontsize=9, verticalalignment='top', 
+                        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+            
+            # График ПОСЛЕ отбора
+            ax2 = axes[1]
+            scatter2 = ax2.scatter(pca_after[:, 0], pca_after[:, 1], 
+                                   c=pd.factorize(stages_after)[0], 
+                                   cmap='viridis', alpha=0.6, s=80, edgecolors='black', linewidth=0.5)
+            
+            # Добавление меток скважин
+            for i, well in enumerate(wells_after):
+                ax2.annotate(well, (pca_after[i, 0], pca_after[i, 1]), 
+                            fontsize=8, alpha=0.7, xytext=(3, 3), textcoords='offset points')
+            
+            # Отображение центроидов
+            for well in np.unique(wells_after):
+                well_mask = wells_after == well
+                well_pca = pca_after[well_mask]
+                well_stages = stages_after[well_mask]
+                
+                for stage in ['1', '2']:
+                    stage_mask = well_stages == stage
+                    if np.sum(stage_mask) > 0:
+                        centroid = np.mean(well_pca[stage_mask], axis=0)
+                        marker = 's' if stage == '1' else 'o'
+                        ax2.scatter(centroid[0], centroid[1], 
+                                   marker=marker, s=200, c='red', 
+                                   edgecolors='darkred', linewidth=2,
+                                   label=f'{well} Stage {stage}' if well == wells_in_group[0] else "")
+            
+            ax2.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.2%})')
+            ax2.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.2%})')
+            ax2.set_title(f'PCA: После отбора\nСкважины: {", ".join(wells_in_group)}', fontsize=12)
+            ax2.grid(True, alpha=0.3)
+            
+            # Легенда с расстояниями центроидов
+            legend_text = []
+            for well, dist in centroid_dist_after.items():
+                legend_text.append(f'{well}: d={dist:.3f}')
+            if legend_text:
+                ax2.text(0.02, 0.98, '\n'.join(legend_text), transform=ax2.transAxes, 
+                        fontsize=9, verticalalignment='top', 
+                        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+            
+            plt.tight_layout()
+            filename = f'{save_path_prefix}_pca_comparison_group{group_idx + 1}.png'
+            plt.savefig(filename, dpi=300, bbox_inches='tight')
+            print(f"  Сохранено: {filename}")
+            plt.show()
+        
+        return self
+
     def save_results(self, output_prefix='results'):
         """Сохранение результатов"""
         print("\nСохранение результатов...")
@@ -510,6 +693,7 @@ def main():
     # Визуализация
     selector.visualize_similarity(save_path_prefix='results')
     selector.visualize_variance(save_path_prefix='results')
+    selector.visualize_pca_comparison(save_path_prefix='results')
     
     # Сохранение результатов
     selector.save_results(output_prefix='results')
